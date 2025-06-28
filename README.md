@@ -12,6 +12,17 @@ Dune Assistant is a Chrome extension designed to enhance your data interaction e
 *   **Progress Display**: Shows a progress bar and estimated completion time during full data export.
 *   **Data Copy**: Within the modal, supports copying the full content of a cell, even if the content is truncated.
 
+## Screenshots
+
+### View Data and Export CSV Buttons
+![View Data and Export CSV Buttons](images/assist_activated.png)
+
+### View Data Modal
+![View Data Modal](images/assist_view_data.png)
+
+### Export Progress
+![Export Progress](images/assist_export_csv.png)
+
 ## Installation Steps
 
 1.  **Download the Extension**:

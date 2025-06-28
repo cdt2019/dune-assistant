@@ -10,6 +10,17 @@ Dune Assistant 是一款 Chrome 扩展程序，旨在增强您在 Dune Analytics
 *   **进度显示**：在导出全量数据时，显示进度条和预计完成时间。
 *   **数据复制**：在模态框中，支持复制单元格的完整内容，即使内容被截断。
 
+## 效果图
+
+### 查看数据和导出 CSV 按钮
+![查看数据和导出 CSV 按钮](images/assist_activated.png)
+
+### 查看数据模态框
+![查看数据模态框](images/assist_view_data.png)
+
+### 导出进度
+![导出进度](images/assist_export_csv.png)
+
 ## 安装步骤
 
 1.  **下载扩展程序**：
