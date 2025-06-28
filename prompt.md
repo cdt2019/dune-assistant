@@ -1,7 +1,7 @@
 1. 难点：由于dune 执行sql结果后，结果数据显示组件通常是被遮盖或者无法全部显示数据。导出cvs文件需要积分。
 如图：
-![结果数据无法显示](./imags/dune_result.png)
-![无法导出csv](./imags/export_csv.png)
+![结果数据无法显示](./images/dune_result.png)
+![无法导出csv](./images/export_csv.png)
 
 2. 需求：构建一个chrome插件 dune assistant，协助用户查看 [dune](https://dune.com/queries) queriy 结果数据和导出csv文件。
   2.1. 协助用户查看结果，当用户选择选定 结果section 时，以弹出框形式显示完整的数据.
