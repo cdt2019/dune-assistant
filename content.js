@@ -1,4 +1,5 @@
-
+if (typeof window.duneAssistantInjected === 'undefined') {
+    window.duneAssistantInjected = true;
 
 // Log that the content script has been injected and is running.
 console.log("Dune Assistant has been activated.");
@@ -296,20 +297,64 @@ function hideCustomTooltip() {
 }
 
 // Function to find Dune's pagination buttons
+// Function to find Dune's pagination buttons
 const findDunePaginationButtons = async () => {
     const footer = await waitForElement('div.visual_vizFooter__vCe59');
-    if (!footer) return { first: null, prev: null, next: null, last: null, pageInfo: null };
+    if (!footer) {
+        console.error("[Dune Assistant] Could not find footer.");
+        return { first: null, prev: null, next: null, last: null, pageInfoElement: null, pageInfoType: null };
+    }
 
     const ul = await waitForElement('ul.table_footer__Ky_k2', footer);
-    if (!ul) return { first: null, prev: null, next: null, last: null, pageInfo: null };
+    if (!ul) {
+        console.error("[Dune Assistant] Could not find ul element in footer.");
+        return { first: null, prev: null, next: null, last: null, pageInfoElement: null, pageInfoType: null };
+    }
 
-    const firstButton = ul.querySelector('li:nth-child(3) button');
-    const prevButton = ul.querySelector('li:nth-child(4) button');
-    const pageInfoSelect = ul.querySelector('li:nth-child(5) select');
-    const nextButton = ul.querySelector('li:nth-child(6) button');
-    const lastButton = ul.querySelector('li:nth-child(7) button');
+    let firstButton, prevButton, nextButton, lastButton, pageInfoElement, pageInfoType;
 
-    return { first: firstButton, prev: prevButton, next: nextButton, last: lastButton, pageInfo: pageInfoSelect };
+    const listItems = Array.from(ul.querySelectorAll('li'));
+
+    // Try to find the page info element first, as it's the pivot
+    let pageInfoLi = listItems.find(li => li.querySelector('select'));
+    pageInfoType = 'select';
+    
+    if (pageInfoLi) {
+        pageInfoElement = pageInfoLi.querySelector('select');
+    } else {
+        // If no select, try to find the text-based info
+        pageInfoLi = listItems.find(li => li.textContent.includes('of') && !li.querySelector('button'));
+        if(pageInfoLi) {
+            pageInfoElement = pageInfoLi;
+            pageInfoType = 'text';
+        }
+    }
+
+    if (pageInfoLi) {
+        // Find buttons relative to the page info LI
+        const pageInfoIndex = listItems.indexOf(pageInfoLi);
+        if (pageInfoIndex > 1) {
+            prevButton = listItems[pageInfoIndex - 1]?.querySelector('button');
+            firstButton = listItems[pageInfoIndex - 2]?.querySelector('button');
+        }
+        if (pageInfoIndex < listItems.length - 1) {
+            nextButton = listItems[pageInfoIndex + 1]?.querySelector('button');
+            if (nextButton) {
+                lastButton = listItems[pageInfoIndex + 2]?.querySelector('button');
+            }
+        }
+    } else {
+        // Fallback if we can't find a page info pivot
+        const buttons = ul.querySelectorAll('button');
+        if (buttons.length >= 4) {
+            firstButton = buttons[0];
+            prevButton = buttons[1];
+            nextButton = buttons[2];
+            lastButton = buttons[3];
+        }
+    }
+    
+    return { first: firstButton, prev: prevButton, next: nextButton, last: lastButton, pageInfoElement, pageInfoType };
 };
 
 const getCurrentPageText = async () => {
@@ -320,16 +365,49 @@ const getCurrentPageText = async () => {
     return "unknown_page"; // Default if page info not found
 };
 
+const awaitTableUpdate = (tableElement) => {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            observer.disconnect();
+            console.warn("[Dune Assistant] Timeout waiting for table update. Proceeding anyway.");
+            resolve(); // Resolve instead of reject to make it more robust
+        }, 5000); // 5-second timeout as a fallback
+
+        const observer = new MutationObserver((mutationsList, obs) => {
+            // We only care that a change happened, not what it was.
+            // As soon as the table changes, we know the new data is in.
+            clearTimeout(timeout);
+            obs.disconnect(); // Stop observing to avoid unnecessary processing
+            resolve();
+        });
+
+        // Observe the table element itself for child list and subtree changes.
+        // This is more robust as React might replace the entire <tbody>.
+        observer.observe(tableElement, { childList: true, subtree: true });
+    });
+};
+
 // Helper to simulate a click on Dune's pagination buttons and wait for data change
 const simulateDunePaginationClick = async (duneButtonName) => {
     try {
+        const table = await getTableElement();
+        if (!table) {
+            console.error("[Dune Assistant] Could not find table to observe for pagination.");
+            return false;
+        }
+
         let duneBtns = await findDunePaginationButtons();
         const buttonToClick = duneBtns[duneButtonName];
+
         if (buttonToClick && !buttonToClick.disabled) {
+            // Start waiting for the DOM change *before* the click
+            // We pass the whole table element, which is more stable than its tbody.
+            const tableUpdatePromise = awaitTableUpdate(table);
+            
             buttonToClick.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-            const initialData = await extractData(); // Get current data before waiting
-            await waitForTableDataChange(initialData);
-            await new Promise(resolve => setTimeout(resolve, 250)); // Add a small delay after data changes
+
+            await tableUpdatePromise; // Wait for the observer to fire
+            await new Promise(resolve => setTimeout(resolve, 50)); // A tiny delay for any final rendering
             return true;
         } else {
             return false;
@@ -338,30 +416,6 @@ const simulateDunePaginationClick = async (duneButtonName) => {
         console.error(`Error simulating ${duneButtonName} button click or waiting for data:`, error);
         return false;
     }
-};
-
-// Helper to wait for table data to change (this can be global)
-const waitForTableDataChange = async (initialData) => {
-    return new Promise(async resolve => {
-        let attempts = 0;
-        const maxAttempts = 50; // Max attempts to wait for data change (e.g., 50 * 100ms = 5 seconds)
-        const delay = 100; // Check every 100ms
-
-        const checkData = async () => {
-            const newData = await extractData();
-            // Check if data is different and not empty (to avoid resolving on empty initial data)
-            if (JSON.stringify(newData) !== JSON.stringify(initialData) && newData.length > 0) {
-                resolve();
-            } else if (attempts < maxAttempts) {
-                attempts++;
-                setTimeout(checkData, delay);
-            } else {
-                console.warn("waitForTableDataChange timed out. Data might not have changed or is empty.");
-                resolve(); // Resolve anyway to prevent infinite loop, but log a warning
-            }
-        };
-        checkData();
-    });
 };
 
 // This function will be called by both the modal's "Export All CSV" and the main page's "Export CSV"
@@ -401,8 +455,28 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
         let duneBtns = await findDunePaginationButtons();
         let totalPages = 1;
 
-        if (duneBtns.pageInfo && duneBtns.pageInfo.options.length > 0) {
-            totalPages = duneBtns.pageInfo.options.length;
+        if (duneBtns.pageInfoElement) {
+            if (duneBtns.pageInfoType === 'select') {
+                totalPages = duneBtns.pageInfoElement.options.length;
+            } else if (duneBtns.pageInfoType === 'text') {
+                const textContent = duneBtns.pageInfoElement.textContent.trim();
+                const parts = textContent.split('of').map(p => p.trim().replace(/,/g, ''));
+                if (parts.length === 2) {
+                    totalPages = parseInt(parts[1], 10);
+                }
+            }
+        } else {
+            // Fallback calculation if page info element is not found
+            const totalRowsElement = await waitForElement('span.table_total__eti_u');
+            if (totalRowsElement) {
+                const totalRowsText = totalRowsElement.textContent || "";
+                const totalRows = parseInt(totalRowsText.replace(/,/g, '').replace(/\s*rows/i, '').trim(), 10);
+                const firstPageData = await extractData();
+                const pageSize = firstPageData.length;
+                if (pageSize > 0 && !isNaN(totalRows)) {
+                    totalPages = Math.ceil(totalRows / pageSize);
+                }
+            }
         }
 
         if (duneBtns.first && !duneBtns.first.disabled) {
@@ -455,6 +529,7 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
                 updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, duneBtns);
             }
 
+            duneBtns = await findDunePaginationButtons(); // Re-fetch buttons after potential UI update
             if (!duneBtns.next || duneBtns.next.disabled) {
                 break;
             }
@@ -557,18 +632,93 @@ const renderTable = (tableElement, dataToRender) => {
     tableElement.appendChild(body);
   };
 
-const updatePaginationControls = (modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, pageInfoSpn, duneBtns) => {
+const getPageInfoFromReact = () => {
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            reject(new Error('Timeout waiting for page info from React component'));
+        }, 2000); // 2-second timeout
+
+        const listener = (event) => {
+            if (event.source === window && event.data.type === 'DuneAssistant_PageInfoResponse') {
+                clearTimeout(timeout);
+                window.removeEventListener('message', listener);
+                if (event.data.error) {
+                    reject(new Error(event.data.error));
+                } else {
+                    resolve(event.data.data);
+                }
+            }
+        };
+
+        window.addEventListener('message', listener);
+        window.dispatchEvent(new CustomEvent('DuneAssistant_GetPageInfo'));
+    });
+};
+
+const updatePaginationControls = async (modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, pageInfoSpn, totalRowsSpn, duneBtns, modalState) => {
+    console.log("[Dune Assistant] Updating pagination controls with:", duneBtns, "and state:", modalState);
     modalFirstBtn.disabled = !duneBtns.first || duneBtns.first.disabled;
     modalPrevBtn.disabled = !duneBtns.prev || duneBtns.prev.disabled;
     modalNextBtn.disabled = !duneBtns.next || duneBtns.next.disabled;
     modalLastBtn.disabled = !duneBtns.last || duneBtns.last.disabled;
 
-    if (duneBtns.pageInfo && duneBtns.pageInfo.options.length > 0) {
-        const currentPageText = duneBtns.pageInfo.options[duneBtns.pageInfo.selectedIndex].textContent.trim();
-        const totalPages = duneBtns.pageInfo.options.length;
-        pageInfoSpn.textContent = `${currentPageText} of ${totalPages}`;
-    } else {
-        pageInfoSpn.textContent = 'Page Info N/A';
+    try {
+        const reactPageInfo = await getPageInfoFromReact();
+        console.log("[Dune Assistant] Received page info from React:", reactPageInfo);
+
+        const currentPageNum = reactPageInfo.pageIndex + 1; // Convert 0-indexed to 1-indexed
+        const totalPages = reactPageInfo.pageCount;
+        const totalRows = reactPageInfo.total;
+
+        modalState.currentPage = currentPageNum;
+        modalState.totalPages = totalPages;
+
+        pageInfoSpn.textContent = `Page ${currentPageNum} of ${totalPages}`;
+        totalRowsSpn.textContent = `(${totalRows.toLocaleString()} rows)`;
+
+    } catch (error) {
+        console.error("[Dune Assistant] Could not get page info from React, falling back to calculation:", error);
+        // Fallback logic from previous implementation
+        try {
+            const totalRowsElement = await waitForElement('span.table_total__eti_u');
+            if (!totalRowsElement) {
+                pageInfoSpn.textContent = 'Page Info N/A';
+                totalRowsSpn.textContent = '';
+                return;
+            }
+
+            const totalRowsText = totalRowsElement.textContent || "";
+            const totalRows = parseInt(totalRowsText.replace(/,/g, '').replace(/\s*rows/i, '').trim(), 10);
+
+            if (isNaN(totalRows)) {
+                pageInfoSpn.textContent = 'Page Info N/A';
+                totalRowsSpn.textContent = '';
+                return;
+            }
+
+            totalRowsSpn.textContent = `(${totalRows.toLocaleString()} rows)`;
+            const currentPageData = await extractData();
+            const pageSize = currentPageData.length;
+
+            if (pageSize > 0) {
+                const totalPages = Math.ceil(totalRows / pageSize);
+                modalState.totalPages = totalPages;
+
+                if (duneBtns.first && duneBtns.first.disabled) {
+                    modalState.currentPage = 1;
+                } else if (duneBtns.last && duneBtns.last.disabled) {
+                    modalState.currentPage = totalPages;
+                }
+                
+                pageInfoSpn.textContent = `Page ${modalState.currentPage} of ${totalPages}`;
+            } else {
+                pageInfoSpn.textContent = 'Page Info N/A';
+            }
+        } catch (calcError) {
+            pageInfoSpn.textContent = 'Page Info N/A';
+            totalRowsSpn.textContent = '';
+            console.error("[Dune Assistant] Error in fallback calculation:", calcError);
+        }
     }
 };
 
@@ -662,7 +812,7 @@ const createProgressBarElements = (idPrefix) => {
   modal.style.flexDirection = 'column'; // Stack children vertically
   modal.style.overflow = 'hidden'; // Hide modal's own scrollbars
 
-  
+  const modalState = { currentPage: 1, totalPages: 1, isInitial: true };
 
   // Create Toolbar
   const toolbar = document.createElement('div');
@@ -697,7 +847,7 @@ const createProgressBarElements = (idPrefix) => {
     renderTable(modalTableEl, currentData); // Update modal table
 
     const duneBtns = await findDunePaginationButtons(); // Get latest Dune pagination state
-    updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, duneBtns);
+    updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, duneBtns, modalState);
     showNotification("Refresh completed!"); // Show notification after refresh
     btn.blur(); // Remove focus from the button
 
@@ -764,35 +914,43 @@ const createProgressBarElements = (idPrefix) => {
   pageInfoSpan.style.margin = '0 10px';
   pageInfoSpan.style.color = '#6c757d';
 
-  
+  const totalRowsSpan = document.createElement('span');
+  totalRowsSpan.id = 'dune-assistant-modal-total-rows';
+  totalRowsSpan.style.margin = '0 10px';
+  totalRowsSpan.style.color = '#6c757d';
+  totalRowsSpan.style.fontSize = '12px';
 
   firstButton.addEventListener('click', async () => {
-    await simulateDunePaginationClick('first');
-    currentPageData = await extractData(); // Re-fetch data for the new page
-    renderTable(tableEl, currentPageData);
-    const duneBtns = await findDunePaginationButtons(); // Re-fetch buttons to get new state
-    updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, duneBtns);
+    if (await simulateDunePaginationClick('first')) {
+        currentPageData = await extractData();
+        renderTable(tableEl, currentPageData);
+        const duneBtns = await findDunePaginationButtons();
+        updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, totalRowsSpan, duneBtns, modalState);
+    }
   });
   prevButton.addEventListener('click', async () => {
-    await simulateDunePaginationClick('prev');
-    currentPageData = await extractData(); // Re-fetch data for the new page
-    renderTable(tableEl, currentPageData);
-    const duneBtns = await findDunePaginationButtons(); // Re-fetch buttons to get new state
-    updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, duneBtns);
+    if (await simulateDunePaginationClick('prev')) {
+        currentPageData = await extractData();
+        renderTable(tableEl, currentPageData);
+        const duneBtns = await findDunePaginationButtons();
+        updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, totalRowsSpan, duneBtns, modalState);
+    }
   });
   nextButton.addEventListener('click', async () => {
-    await simulateDunePaginationClick('next');
-    currentPageData = await extractData(); // Re-fetch data for the new page
-    renderTable(tableEl, currentPageData);
-    const duneBtns = await findDunePaginationButtons(); // Re-fetch buttons to get new state
-    updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, duneBtns);
+    if (await simulateDunePaginationClick('next')) {
+        currentPageData = await extractData();
+        renderTable(tableEl, currentPageData);
+        const duneBtns = await findDunePaginationButtons();
+        updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, totalRowsSpan, duneBtns, modalState);
+    }
   });
   lastButton.addEventListener('click', async () => {
-    await simulateDunePaginationClick('last');
-    currentPageData = await extractData(); // Re-fetch data for the new page
-    renderTable(tableEl, currentPageData);
-    const duneBtns = await findDunePaginationButtons(); // Re-fetch buttons to get new state
-    updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, duneBtns);
+    if (await simulateDunePaginationClick('last')) {
+        currentPageData = await extractData();
+        renderTable(tableEl, currentPageData);
+        const duneBtns = await findDunePaginationButtons();
+        updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, totalRowsSpan, duneBtns, modalState);
+    }
   });
 
   toolbarRight.appendChild(firstButton);
@@ -800,6 +958,7 @@ const createProgressBarElements = (idPrefix) => {
   toolbarRight.appendChild(pageInfoSpan);
   toolbarRight.appendChild(nextButton);
   toolbarRight.appendChild(lastButton);
+  toolbarRight.appendChild(totalRowsSpan);
 
   toolbar.appendChild(toolbarRight);
 
@@ -857,10 +1016,18 @@ const createProgressBarElements = (idPrefix) => {
 
   // Update pagination controls after modal is appended and elements are in DOM
   const initialDuneButtons = await findDunePaginationButtons();
-  updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, initialDuneButtons);
+  updatePaginationControls(firstButton, prevButton, nextButton, lastButton, pageInfoSpan, totalRowsSpan, initialDuneButtons, modalState);
 };
 
 let isInitializing = false;
+
+// Function to inject the script that can access the page's JS context
+const injectScript = (filePath) => {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL(filePath);
+    (document.head || document.documentElement).appendChild(script);
+    script.onload = () => script.remove();
+};
 
 const init = async () => {
   if (isInitializing || document.getElementById('dune-assistant-view-data-button')) {
@@ -870,6 +1037,7 @@ const init = async () => {
 
   try {
     injectGlobalStyles(); // Inject styles once
+    injectScript('injected.js'); // Inject the script to access React props
 
     const resultsSection = await waitForElement('section[id="results"]');
     if (!resultsSection) {
@@ -954,3 +1122,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     showNotification(request.message);
   }
 });
+
+}
