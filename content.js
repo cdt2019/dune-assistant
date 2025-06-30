@@ -225,27 +225,52 @@ const waitForElement = async (selector, parentElement = document, maxAttempts = 
 const getTableElement = async () => {
     const resultsSection = await waitForElement('section[id="results"]');
     if (!resultsSection) {
-        console.error("Could not find #results section.");
         return null;
     }
-    const tableContainer = await waitForElement('div.visual_result__6q0xu', resultsSection);
-    if (tableContainer) {
-        return await waitForElement('table', tableContainer);
+
+    let tableContainer = null;
+    let attempts = 0;
+    const maxAttempts = 40; // Increased attempts for longer waits
+    const delay = 250; // 250ms delay
+
+    while (attempts < maxAttempts) {
+        tableContainer = await waitForElement('div.visual_result__6q0xu', resultsSection, 1, 0); // Check immediately
+        if (tableContainer) {
+            // Check if it's a loading message
+            const loadingMessage = tableContainer.querySelector('div.visual_resultMessage__JgmHi');
+            if (loadingMessage) {
+                // Still loading, wait and retry
+                await new Promise(resolve => setTimeout(resolve, delay));
+                attempts++;
+                continue;
+            }
+
+            // Check for the actual table
+            const table = await waitForElement('table', tableContainer, 1, 0); // Check immediately
+            if (table) {
+                return table; // Found the table
+            }
+        }
+        // If no tableContainer or no table yet, wait and retry
+        await new Promise(resolve => setTimeout(resolve, delay));
+        attempts++;
     }
-    return null;
+    return null; // Table not found after max attempts
 };
 
 const extractData = async () => {
   const table = await getTableElement();
   if (!table) {
-      console.error("Could not find the main table element for data extraction.");
       return [];
   }
+
+  // Wait for at least one data row to appear in the table body
+  const firstRow = await waitForElement('tbody tr', table);
+  if (!firstRow) {
+      return [];
+  }
+
   const rows = Array.from(table.querySelectorAll('tbody tr'));
-  if (rows.length === 0) {
-      console.error("No data rows found within <tbody><tr>.");
-      return [];
-  }
   return rows.map(row => 
     Array.from(row.querySelectorAll('td')).map(cell => cell.textContent.trim())
   );
@@ -301,13 +326,11 @@ function hideCustomTooltip() {
 const findDunePaginationButtons = async () => {
     const footer = await waitForElement('div.visual_vizFooter__vCe59');
     if (!footer) {
-        console.error("[Dune Assistant] Could not find footer.");
         return { first: null, prev: null, next: null, last: null, pageInfoElement: null, pageInfoType: null };
     }
 
     const ul = await waitForElement('ul.table_footer__Ky_k2', footer);
     if (!ul) {
-        console.error("[Dune Assistant] Could not find ul element in footer.");
         return { first: null, prev: null, next: null, last: null, pageInfoElement: null, pageInfoType: null };
     }
 
@@ -392,7 +415,6 @@ const simulateDunePaginationClick = async (duneButtonName) => {
     try {
         const table = await getTableElement();
         if (!table) {
-            console.error("[Dune Assistant] Could not find table to observe for pagination.");
             return false;
         }
 
@@ -419,7 +441,7 @@ const simulateDunePaginationClick = async (duneButtonName) => {
 };
 
 // This function will be called by both the modal's "Export All CSV" and the main page's "Export CSV"
-const performFullExport = async (exportButton, otherButton, progressBarContainer, progressBar, progressBarText, pageInfoPrefix = "all") => {
+const performFullExport = async (exportButton, otherButton, progressBarContainer, progressBar, progressBarText, pageInfoPrefix = "all", modalState, modalTotalRowsSpan, originalExportHandler) => {
     cancelExportFlag = false;
     const originalButtonText = exportButton.textContent;
     const originalButtonClasses = Array.from(exportButton.classList);
@@ -433,7 +455,8 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
         exportButton.textContent = originalButtonText;
         exportButton.classList.remove('btn-close');
         originalButtonClasses.forEach(cls => exportButton.classList.add(cls));
-        exportButton.onclick = originalClickHandlerRef; // Restore original handler
+        exportButton.removeEventListener('click', cancelAndReset); // Remove cancel handler
+        exportButton.addEventListener('click', originalExportHandler); // Restore original handler
         if (otherButton) otherButton.disabled = false;
         progressBarContainer.style.display = 'none';
     };
@@ -441,7 +464,8 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
     exportButton.textContent = 'Cancel Export';
     exportButton.classList.remove('btn-secondary', 'btn-primary');
     exportButton.classList.add('btn-close');
-    exportButton.onclick = cancelAndReset; // Set the cancel handler
+    exportButton.removeEventListener('click', originalExportHandler); // Remove original handler
+    exportButton.addEventListener('click', cancelAndReset); // Set the cancel handler
 
     if (otherButton) otherButton.disabled = true;
     progressBarContainer.style.display = 'block';
@@ -487,6 +511,26 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
         while (true) {
             if (cancelExportFlag) {
                 alert("Export cancelled.");
+
+                // Only attempt to refresh modal UI if the export was initiated from the modal
+                if (exportButton.id === 'dune-assistant-export-all-csv-button') {
+                    // Get references to modal elements
+                    const modalTableEl = document.getElementById('dune-assistant-modal-table');
+                    const modalFirstBtn = document.getElementById('dune-assistant-modal-first-button');
+                    const modalPrevBtn = document.getElementById('dune-assistant-modal-prev-button');
+                    const modalNextBtn = document.getElementById('dune-assistant-modal-next-button');
+                    const modalLastBtn = document.getElementById('dune-assistant-modal-last-button');
+                    const modalPageInfoSpan = document.getElementById('dune-assistant-modal-page-info');
+
+                    // Get current data from Dune page
+                    const currentDunePageData = await extractData();
+                    renderTable(modalTableEl, currentDunePageData);
+
+                    // Get latest Dune pagination state and update modal controls
+                    const latestDuneBtns = await findDunePaginationButtons();
+                    updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, modalTotalRowsSpan, latestDuneBtns, modalState);
+                }
+
                 break;
             }
 
@@ -505,10 +549,14 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
                 const estimatedRemainingTimeMs = averagePageTime * remainingPages;
 
                 let etcText = '';
-                if (estimatedRemainingTimeMs < 60000) { // Less than 1 minute
-                    etcText = `${Math.ceil(estimatedRemainingTimeMs / 1000)}s remaining`;
-                } else { // Minutes
-                    etcText = `${Math.ceil(estimatedRemainingTimeMs / 60000)}m remaining`;
+                const estimatedRemainingSeconds = Math.ceil(estimatedRemainingTimeMs / 1000);
+                const minutes = Math.floor(estimatedRemainingSeconds / 60);
+                const seconds = estimatedRemainingSeconds % 60;
+
+                if (minutes > 0) {
+                    etcText = `${minutes}m ${seconds}s remaining`;
+                } else {
+                    etcText = `${seconds}s remaining`;
                 }
                 progressText += ` (${etcText})`;
             }
@@ -526,7 +574,7 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
 
                 renderTable(modalTableEl, pageData);
                 duneBtns = await findDunePaginationButtons();
-                updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, duneBtns);
+                updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, modalTotalRowsSpan, duneBtns, modalState);
             }
 
             duneBtns = await findDunePaginationButtons(); // Re-fetch buttons after potential UI update
@@ -556,7 +604,9 @@ const performFullExport = async (exportButton, otherButton, progressBarContainer
             exportButton.textContent = originalButtonText;
             exportButton.classList.remove('btn-close');
             originalButtonClasses.forEach(cls => exportButton.classList.add(cls));
-            exportButton.onclick = originalClickHandlerRef; // Restore original handler
+            exportButton.removeEventListener('click', cancelAndReset); // Remove cancel handler
+            exportButton.addEventListener('click', originalExportHandler); // Restore original handler
+            exportButton.addEventListener('click', originalExportHandler); // Restore original handler
             if (otherButton) otherButton.disabled = false;
             progressBarContainer.style.display = 'none';
         }
@@ -636,7 +686,7 @@ const getPageInfoFromReact = () => {
     return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
             reject(new Error('Timeout waiting for page info from React component'));
-        }, 2000); // 2-second timeout
+        }, 5000); // 5-second timeout
 
         const listener = (event) => {
             if (event.source === window && event.data.type === 'DuneAssistant_PageInfoResponse') {
@@ -656,7 +706,6 @@ const getPageInfoFromReact = () => {
 };
 
 const updatePaginationControls = async (modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, pageInfoSpn, totalRowsSpn, duneBtns, modalState) => {
-    console.log("[Dune Assistant] Updating pagination controls with:", duneBtns, "and state:", modalState);
     modalFirstBtn.disabled = !duneBtns.first || duneBtns.first.disabled;
     modalPrevBtn.disabled = !duneBtns.prev || duneBtns.prev.disabled;
     modalNextBtn.disabled = !duneBtns.next || duneBtns.next.disabled;
@@ -664,7 +713,6 @@ const updatePaginationControls = async (modalFirstBtn, modalPrevBtn, modalNextBt
 
     try {
         const reactPageInfo = await getPageInfoFromReact();
-        console.log("[Dune Assistant] Received page info from React:", reactPageInfo);
 
         const currentPageNum = reactPageInfo.pageIndex + 1; // Convert 0-indexed to 1-indexed
         const totalPages = reactPageInfo.pageCount;
@@ -677,7 +725,6 @@ const updatePaginationControls = async (modalFirstBtn, modalPrevBtn, modalNextBt
         totalRowsSpn.textContent = `(${totalRows.toLocaleString()} rows)`;
 
     } catch (error) {
-        console.error("[Dune Assistant] Could not get page info from React, falling back to calculation:", error);
         // Fallback logic from previous implementation
         try {
             const totalRowsElement = await waitForElement('span.table_total__eti_u');
@@ -717,7 +764,6 @@ const updatePaginationControls = async (modalFirstBtn, modalPrevBtn, modalNextBt
         } catch (calcError) {
             pageInfoSpn.textContent = 'Page Info N/A';
             totalRowsSpn.textContent = '';
-            console.error("[Dune Assistant] Error in fallback calculation:", calcError);
         }
     }
 };
@@ -843,11 +889,12 @@ const createProgressBarElements = (idPrefix) => {
     const modalNextBtn = document.getElementById('dune-assistant-modal-next-button');
     const modalLastBtn = document.getElementById('dune-assistant-modal-last-button');
     const modalPageInfoSpan = document.getElementById('dune-assistant-modal-page-info');
+    const modalTotalRowsSpan = document.getElementById('dune-assistant-modal-total-rows'); // Get the total rows span
 
     renderTable(modalTableEl, currentData); // Update modal table
 
     const duneBtns = await findDunePaginationButtons(); // Get latest Dune pagination state
-    updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, duneBtns, modalState);
+    updatePaginationControls(modalFirstBtn, modalPrevBtn, modalNextBtn, modalLastBtn, modalPageInfoSpan, modalTotalRowsSpan, duneBtns, modalState); // Corrected call
     showNotification("Refresh completed!"); // Show notification after refresh
     btn.blur(); // Remove focus from the button
 
@@ -875,14 +922,15 @@ const createProgressBarElements = (idPrefix) => {
   });
   exportPageButton.id = 'dune-assistant-export-page-csv-button'; // Add ID
 
-  const exportAllButton = createButton('Export All CSV', ['btn-secondary'], async () => {
+  const exportAllCsvHandler = async () => {
     const exportPageButton = document.getElementById('dune-assistant-export-page-csv-button');
     const exportAllButton = document.getElementById('dune-assistant-export-all-csv-button');
     const modalProgressBarContainer = document.getElementById('dune-assistant-modal-progress-container');
     const modalProgressBar = document.getElementById('dune-assistant-modal-progress-bar');
     const modalProgressBarText = document.getElementById('dune-assistant-modal-progress-bar-text');
-    await performFullExport(exportAllButton, exportPageButton, modalProgressBarContainer, modalProgressBar, modalProgressBarText, "all");
-  });
+    await performFullExport(exportAllButton, exportPageButton, modalProgressBarContainer, modalProgressBar, modalProgressBarText, "all", modalState, totalRowsSpan, exportAllCsvHandler); // Pass modalState and totalRowsSpan, and the handler itself
+  };
+  const exportAllButton = createButton('Export All CSV', ['btn-secondary'], exportAllCsvHandler);
   exportAllButton.id = 'dune-assistant-export-all-csv-button'; // Add ID
   toolbarCenter.appendChild(exportPageButton);
   toolbarCenter.appendChild(exportAllButton);
@@ -1060,12 +1108,13 @@ const init = async () => {
     const viewDataButton = createButton('View Data', ['btn-primary'], showModal);
     viewDataButton.id = 'dune-assistant-view-data-button';
 
-    const exportCsvButton = createButton('Export CSV', ['btn-secondary'], async () => {
+    const mainExportCsvHandler = async () => {
       const exportButton = document.getElementById('dune-assistant-export-csv-button');
       const viewDataButton = document.getElementById('dune-assistant-view-data-button');
       // Pass the globally declared progress bar elements
-      await performFullExport(exportButton, viewDataButton, mainProgressBarContainer, mainProgressBar, mainProgressBarText, "all");
-    });
+      await performFullExport(exportButton, viewDataButton, mainProgressBarContainer, mainProgressBar, mainProgressBarText, "all", undefined, undefined, mainExportCsvHandler);
+    };
+    const exportCsvButton = createButton('Export CSV', ['btn-secondary'], mainExportCsvHandler);
     exportCsvButton.id = 'dune-assistant-export-csv-button';
 
     const mainProgressBarElements = createProgressBarElements('dune-assistant-main');

@@ -18,13 +18,28 @@
         return null;
     }
 
+    // Helper function to wait for an element to appear in the DOM
+    const waitForElement = async (selector, parentElement = document, maxAttempts = 20, delay = 250) => {
+        let element = null;
+        let attempts = 0;
+        while (!element && attempts < maxAttempts) {
+            element = parentElement.querySelector(selector);
+            if (element) {
+                return element;
+            }
+            attempts++;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        return null;
+    };
+
     // Listen for a request from the content script
-    window.addEventListener('DuneAssistant_GetPageInfo', () => {
+    window.addEventListener('DuneAssistant_GetPageInfo', async () => { // Make the event listener async
         try {
             // Start search from a known element in the results section
-            const footerElement = document.querySelector('div.visual_vizFooter__vCe59 ul.table_footer__Ky_k2');
+            const footerElement = await waitForElement('div.visual_vizFooter__vCe59 ul.table_footer__Ky_k2'); // Use waitForElement
             if (!footerElement) {
-                window.postMessage({ type: 'DuneAssistant_PageInfoResponse', error: 'Could not find footer element.' }, '*');
+                window.postMessage({ type: 'DuneAssistant_PageInfoResponse', error: 'Could not find footer element after waiting.' }, '*');
                 return;
             }
 

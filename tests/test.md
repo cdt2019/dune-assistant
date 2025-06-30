@@ -5,6 +5,9 @@ cd D:\VisulSpace\dune-assistant\
 npx gemini
 
 
+cd E:\VisualCodeWorkspace\dune-assistant
+npx gemini
+
 select * from dex_solana.trades where block_slot = 349653413
 
 
